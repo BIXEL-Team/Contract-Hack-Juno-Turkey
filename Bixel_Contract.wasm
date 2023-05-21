@@ -1,0 +1,208 @@
+use cosmwasm_std::{
+    to_binary, Addr, Api, Binary, CanonicalAddr, Coin, CosmosMsg, Decimal, Deps, DepsMut, Env, HandleResponse,
+    HumanAddr, InitResponse, MessageInfo, Order, Querier, QueryRequest, QueryResponse, StdError, StdResult, Storage,
+    Uint128, WasmMsg,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct State {
+    pub winner: Option<HumanAddr>,
+    pub wallets: Vec<Wallet>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct Wallet {
+    pub address: HumanAddr,
+    pub score: u64,
+    pub inventory: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct InitMsg {}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub enum HandleMsg {
+    RegisterWallet {},
+    AddCarToInventory { car: String },
+    SetScore { score: u64 },
+    DetermineWinner {},
+}
+
+pub fn instantiate(
+    deps: DepsMut,
+    _env: Env,
+    _info: MessageInfo,
+    _msg: InitMsg,
+) -> StdResult<InitResponse> {
+    let state = State {
+        winner: None,
+        wallets: vec![],
+    };
+    set_state(deps.storage, &state)?;
+    
+    Ok(InitResponse::default())
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub enum QueryMsg {
+    GetWallet { address: HumanAddr },
+    GetInventory { address: HumanAddr },
+    GetWinner {},
+}
+
+pub fn init(_deps: DepsMut, _env: Env, _info: MessageInfo, _msg: InitMsg) -> StdResult<InitResponse> {
+    Ok(InitResponse::default())
+}
+
+pub fn handle(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    msg: HandleMsg,
+) -> Result<HandleResponse, StdError> {
+    match msg {
+        HandleMsg::RegisterWallet {} => register_wallet(deps, env, info),
+        HandleMsg::AddCarToInventory { car } => add_car_to_inventory(deps, env, info, car),
+        HandleMsg::SetScore { score } => set_score(deps, env, info, score),
+        HandleMsg::DetermineWinner {} => determine_winner(deps, env, info),
+    }
+}
+
+pub fn register_wallet(
+    deps: DepsMut,
+    _env: Env,
+    info: MessageInfo,
+) -> Result<HandleResponse, StdError> {
+    let wallet_address = info.sender.clone();
+    let wallet = Wallet {
+        address: wallet_address,
+        score: 0,
+        inventory: vec![],
+    };
+
+    let mut state = get_state(deps.storage)?;
+    for wallet in &state.wallets {
+        if wallet.address == info.sender {
+            return Err(StdError::generic_err("Wallet already registered"));
+        }
+    }
+
+    state.wallets.push(wallet);
+    set_state(deps.storage, &state)?;
+
+    Ok(HandleResponse::default())
+}
+
+pub fn add_car_to_inventory(
+    deps: DepsMut,
+    _env: Env,
+    info: MessageInfo,
+    car: String,
+) -> Result<HandleResponse, StdError> {
+    let wallet_address = info.sender.clone();
+
+    let mut state = get_state(deps.storage)?;
+    let wallet_index = state
+        .wallets
+        .iter()
+        .position(|wallet| wallet.address == wallet_address)
+        .ok_or_else(|| StdError::generic_err("Wallet not found"))?;
+
+    state.wallets[wallet_index].inventory.push(car);
+    set_state(deps.storage, &state)?;
+
+    Ok(HandleResponse::default())
+}
+
+pub fn set_score(
+    deps: DepsMut,
+    _env: Env,
+    info: MessageInfo,
+    score: u64,
+) -> Result<HandleResponse, StdError> {
+    let wallet_address = info.sender.clone();
+
+    let mut state = get_state(deps.storage)?;
+    let wallet_index = state
+        .wallets
+        .iter()
+        .position(|wallet| wallet.address == wallet_address)
+        .ok_or_else(|| StdError::generic_err("Wallet not found"))?;
+
+    state.wallets[wallet_index].score = score;
+    set_state(deps.storage, &state)?;
+
+    Ok(HandleResponse::default())
+}
+
+pub fn determine_winner(
+    deps: DepsMut,
+    _env: Env,
+    _info: MessageInfo,
+) -> Result<HandleResponse, StdError> {
+    let state = get_state(deps.storage)?;
+
+    let mut max_score: u64 = 0;
+    let mut winner: Option<HumanAddr> = None;
+
+    for wallet in &state.wallets {
+        if wallet.score > max_score {
+            max_score = wallet.score;
+            winner = Some(wallet.address.clone());
+        }
+    }
+
+    let mut state = get_state(deps.storage)?;
+    state.winner = winner.clone();
+    set_state(deps.storage, &state)?;
+
+    Ok(HandleResponse::default())
+}
+
+pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> Result<QueryResponse, StdError> {
+    match msg {
+        QueryMsg::GetWallet { address } => to_binary(&get_wallet(deps, address)?),
+        QueryMsg::GetInventory { address } => to_binary(&get_inventory(deps, address)?),
+        QueryMsg::GetWinner {} => to_binary(&get_winner(deps)?),
+    }
+}
+
+fn get_state(storage: &mut dyn Storage) -> StdResult<State> {
+    let state = storage.get(CONFIG_KEY)?;
+    match state {
+        Some(data) => Ok(bincode2::deserialize(&data)?),
+        None => Ok(State {
+            winner: None,
+            wallets: vec![],
+        }),
+    }
+}
+
+fn set_state(storage: &mut dyn Storage, state: &State) -> StdResult<()> {
+    storage.set(CONFIG_KEY, &bincode2::serialize(state)?);
+    Ok(())
+}
+
+fn get_wallet(deps: Deps, address: HumanAddr) -> StdResult<Wallet> {
+    let state = get_state(deps.storage)?;
+    for wallet in state.wallets {
+        if wallet.address == address {
+            return Ok(wallet);
+        }
+    }
+    Err(StdError::generic_err("Wallet not found"))
+}
+
+fn get_inventory(deps: Deps, address: HumanAddr) -> StdResult<Vec<String>> {
+    let wallet = get_wallet(deps, address)?;
+    Ok(wallet.inventory)
+}
+
+fn get_winner(deps: Deps) -> StdResult<Option<HumanAddr>> {
+    let state = get_state(deps.storage)?;
+    Ok(state.winner)
+}
+
+const CONFIG_KEY: &[u8] = b"config";
